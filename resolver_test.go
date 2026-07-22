@@ -1,6 +1,9 @@
 package main
 
 import (
+	"io"
+	"log/slog"
+	"os"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -25,7 +28,8 @@ func NewClient() *dns.Client{
 
 func TestNsResolvePath(t *testing.T){
 	q := NewQuestion("dns1.p01.nsone.net", dns.TypeA)
-	answ_rr, err := resolveQ(q, 0)
+	r := Resolver{slog.New(slog.NewTextHandler(io.Discard, nil))}
+	answ_rr, err := r.resolveQ(q, 0)
 
 	if err != nil{
 		t.Error("err during dns exchange: ", err.Error())
@@ -36,17 +40,25 @@ func TestNsResolvePath(t *testing.T){
 }
 
 func TestCNAMEResolvePath(t *testing.T){
-	q := NewQuestion("blog.dnsimple.com", dns.TypeA)
-	answ_rr, err := resolveQ(q, 0)
+	testCases := []string{"blog.dnsimple.com", "www.github.com", "www.apple.com"}
 
-	if err != nil{
-		t.Error("err during dns exchange: ", err.Error())
-	}
+	for _, test := range testCases{
+		t.Run(test, func (t *testing.T){
+			q := NewQuestion(test, dns.TypeA)
+			r := Resolver{slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))}
+			answ_rr, err := r.resolveQ(q, 0)
 
-	if len(answ_rr) == 0{
-		t.Error("No domain name found")
+			if err != nil{
+				t.Error("err during dns exchange: ", err.Error())
+			}
+			if len(answ_rr) == 0{
+				t.Error("No domain name found")
+			}
+			for _, rr  := range answ_rr{
+				t.Log(rr.String())
+			}
+		})
 	}
-	t.Log("HELLO")
 }
 
 

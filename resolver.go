@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"log/slog"
 
 	"github.com/miekg/dns"
@@ -15,12 +14,16 @@ var rootServers = []string{
 }
 var notFoundErr = fmt.Errorf("Couldn't find any answers for given query")
 
-func queryQ(q dns.Question, server string) *dns.Msg {
+type Resolver struct{
+	logger *slog.Logger
+}
+
+func (r Resolver) queryQ(q dns.Question, server string) *dns.Msg {
 	msg := new(dns.Msg)
 	c := new(dns.Client)
 	msg.Question = append(msg.Question, q)
 	resp, rtt, err := c.Exchange(msg, server+":53")
-	log.Println(q.String(), "To: ", server, "RTT: ", rtt,)
+	r.logger.Debug(q.String(), "To: ", server, "RTT: ", rtt,)
 
 	if err != nil {
 		// retry with tcp
@@ -30,7 +33,7 @@ func queryQ(q dns.Question, server string) *dns.Msg {
 	return resp
 }
 
-func resolveQ(q dns.Question, depth int) ([]dns.RR, error) {
+func (r Resolver) resolveQ(q dns.Question, depth int) ([]dns.RR, error) {
 	if depth > 6{
 		return nil, fmt.Errorf("Maximum resolving recursion depth reached")
 	}
@@ -38,18 +41,25 @@ func resolveQ(q dns.Question, depth int) ([]dns.RR, error) {
 	answer := make([]dns.RR, 0, 10)
 	for range 20{
 		for _, server := range servers{
-			resp := queryQ(q, server)
+			resp := r.queryQ(q, server)
 
 			if len(resp.Answer) > 0 {
 				answer = append(answer, resp.Answer...)
 				if q.Qtype == dns.TypeA{
+					var cnameResolved bool
 					for _, rr := range resp.Answer{
+						if rr.Header().Name == q.Name && rr.Header().Rrtype == dns.TypeA{
+							cnameResolved = true
+							break
+						}
 						if rr, ok := rr.(*dns.CNAME); ok{
 							servers = rootServers
 							q.Name = rr.Target
-							fmt.Println("hello ", q.Name)
-							goto NextRound
+							r.logger.Debug("Resolving CNAME " + q.Name)
 						}
+					}
+					if !cnameResolved {
+						goto NextRound
 					}
 				}
 				return answer, nil
@@ -61,7 +71,7 @@ func resolveQ(q dns.Question, depth int) ([]dns.RR, error) {
 			if len(resp.Extra) > 0{
 				for _, extr := range resp.Extra{
 					if rr, ok := extr.(*dns.A); ok{
-						slog.Info("Got additional field " + rr.String())
+						r.logger.Info("Got additional field " + rr.String())
 						nextServers = append(nextServers, rr.A.String())
 					}
 				}
@@ -72,19 +82,18 @@ func resolveQ(q dns.Question, depth int) ([]dns.RR, error) {
 				goto NextRound 
 			}
 
-			fmt.Println(resp.Extra)
 			if len(resp.Ns) > 0 {
-				fmt.Println("Got more than zero referals" )
+				r.logger.Info("Got more than zero referals" )
 				for _, ns := range resp.Ns {
 					n, ok := ns.(*dns.NS)
-					fmt.Printf("%+v", n)
+					r.logger.Debug(fmt.Sprintf("%+v", n))
 					if ok {
 						nsq := dns.Question{Name: n.Ns, Qtype: dns.TypeA, Qclass: dns.ClassINET}
 						// resolve NS; again starting with rootServers
-						log.Println("RESOLVING NS ")
-						rr, err := resolveQ(nsq, depth+1)
+						r.logger.Debug("RESOLVING NS ")
+						rr, err := r.resolveQ(nsq, depth+1)
 						if err != nil{
-							slog.Warn("Err during resolve referals: ", "referal name", n.Hdr.Name, "err", err)
+							r.logger.Warn("Err during resolve referals: ", "referal name", n.Hdr.Name, "err", err)
 							continue
 						}
 						for _, r := range rr{
@@ -113,8 +122,7 @@ func handleAll(w dns.ResponseWriter, m *dns.Msg) {
 	msg.SetReply(m)
 
 	for _, q := range m.Question {
-		rr, err  := resolveQ(q, 0)
-		
+		rr, err  := Resolver{slog.Default()}.resolveQ(q, 0)		
 		if err != nil{
 			// write err as dns err
 			slog.Error("Got err during resolve: ", "err", err)
@@ -143,7 +151,7 @@ func handleAll(w dns.ResponseWriter, m *dns.Msg) {
 	// fmt.Println(msg.Compress)
 
 	if err := w.WriteMsg(msg); err != nil {
-		log.Println("WriteMsg failed:", err)
+		slog.Error("WriteMsg failed: ", "err: ", err)
 	}
 }
 
@@ -165,7 +173,7 @@ func main() {
 		err := udpServer.ListenAndServe()
 
 		if err != nil {
-			log.Fatal(err)
+			slog.Error(err.Error())
 		}
 		wg <- struct{}{}
 	}()
@@ -176,11 +184,11 @@ func main() {
 		err := tcpServer.ListenAndServe()
 
 		if err != nil {
-			log.Fatal(err)
+			slog.Error(err.Error())
 		}
 
 		wg <- struct{}{}
 	}()
-	log.Println("Started tcp and udp servers")
+	slog.Info("Started tcp and udp servers")
 	<-wg
 }
