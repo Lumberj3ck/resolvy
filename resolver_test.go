@@ -26,18 +26,17 @@ func NewClient() *dns.Client{
 }
 
 func TestCacheMatching(t *testing.T){
-	testCases := []struct{test string; want string}{{"blog.dnsimple.com",".com"}, {"www.github.com", "www.github.com"}, {"www.apple.om", "apple.om"}, {"dns1.01.none.net", ".net"}}
+	testCases := []struct{test string;  zone string}{{"blog.dnsimple.com", "com."}, {"www.github.com",  "github.com."}, {"www.apple.om", "apple.om."}, {"dns1.01.none.net", "net."}, {"www.something.net", "something.net."}}
 
 	for _, Tcase := range testCases{
 		c := make(Cache)
 		// NS_RR.Hdr.Name -- is actuall ownership of this refference
-		wantRR := NS_RR{ NS: dns.NS{ Hdr: dns.RR_Header{ Name:   Tcase.want, Rrtype: dns.TypeNS, Class:  dns.ClassINET, }, Ns: Tcase.want}, }
+		wantRR := NS_RR{ NS: dns.NS{ Hdr: dns.RR_Header{ Name:   Tcase.zone, Rrtype: dns.TypeNS, Class:  dns.ClassINET, }}}
 
-		c[Tcase.want] = wantRR
-		t.Log("PUSH", Tcase.test)
+		c[Tcase.zone] = wantRR
 
 		t.Run(Tcase.test, func(t *testing.T) {
-			resp := c.getClosestZone(Tcase.test)
+			resp := c.getClosestZones(Tcase.test)
 			t.Log(resp)
 			if len(resp) == 0 || resp[0].Hdr != wantRR.Hdr{
 				t.Fail()

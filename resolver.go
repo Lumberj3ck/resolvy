@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"strings"
 
 	"github.com/miekg/dns"
 )
@@ -74,12 +73,12 @@ type NS_RR struct {
 
 type Cache map[string]NS_RR
 
-func (c Cache) getClosestZone(name string) []NS_RR{
+func (c Cache) getClosestZones(name string) []NS_RR{
 	// www.apple.com
 	searchList := make([]NS_RR, 0,0)
 
 	for zone, rr := range c{
-		if strings.HasSuffix(name, zone){
+		if dns.IsSubDomain(dns.CanonicalName(zone), dns.CanonicalName(name)){
 			searchList = append(searchList, rr)
 			break
 		}
@@ -124,7 +123,7 @@ func (r Resolver) resolveQ(q dns.Question, depth int) ([]dns.RR, error) {
     //             "close" the resolver is to SNAME
 
 	for range 20{
-		r.Cache.getClosestZone(q.Name)
+		r.Cache.getClosestZones(q.Name)
 	}
 
 
