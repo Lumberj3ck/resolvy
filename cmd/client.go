@@ -9,10 +9,7 @@ import (
 func main() {
 	m := new(dns.Msg)
 	serverAddr := "127.0.0.1:5356"
-	name := "google.com"
-	// m.SetQuestion(dns.Fqdn(name), dns.TypeA)
-	// m.RecursionDesired = false
-	//
+
 	c := new(dns.Client)
 	c.Net = "udp"
 	// d, _, err := c.Exchange(m, serverAddr)
@@ -24,7 +21,7 @@ func main() {
 
 	log.Println("-----------------------------")
 	m = new(dns.Msg)
-	name = "www.youtube.com"
+	name := "blog.dnsimple.com"
 	m.SetQuestion(dns.Fqdn(name), dns.TypeA)
 	m.RecursionDesired = false
 
