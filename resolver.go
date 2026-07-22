@@ -3,19 +3,53 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"net"
+	"strings"
 
 	"github.com/miekg/dns"
 )
 
-var rootServers = []string{
-	"198.41.0.4", // a.root-servers.net
-	"199.9.14.201",
-	"192.33.4.12",
+var safeBelt = []NS_RR{
+	{
+		A: net.ParseIP("198.41.0.4"),
+		NS: dns.NS{
+			Hdr: dns.RR_Header{
+				Name:   ".",
+				Rrtype: dns.TypeNS,
+				Class:  dns.ClassINET,
+			},
+			Ns: "a.root-servers.net.",
+		},
+	},
+	{
+		A: net.ParseIP("199.9.14.201"),
+		NS: dns.NS{
+			Hdr: dns.RR_Header{
+				Name:   ".",
+				Rrtype: dns.TypeNS,
+				Class:  dns.ClassINET,
+			},
+			Ns: "b.root-servers.net.",
+		},
+	},
+	{
+		A: net.ParseIP("192.33.4.12"),
+		NS: dns.NS{
+			Hdr: dns.RR_Header{
+				Name:   ".",
+				Rrtype: dns.TypeNS,
+				Class:  dns.ClassINET,
+			},
+			Ns: "c.root-servers.net.",
+		},
+	},
 }
+
 var notFoundErr = fmt.Errorf("Couldn't find any answers for given query")
 
 type Resolver struct{
 	logger *slog.Logger
+	Cache  Cache
 }
 
 func (r Resolver) queryQ(q dns.Question, server string) *dns.Msg {
@@ -33,96 +67,77 @@ func (r Resolver) queryQ(q dns.Question, server string) *dns.Msg {
 	return resp
 }
 
-func (r Resolver) resolveQ(q dns.Question, depth int) ([]dns.RR, error) {
-	if depth > 6{
-		return nil, fmt.Errorf("Maximum resolving recursion depth reached")
-	}
-	servers := rootServers
-	answer := make([]dns.RR, 0, 10)
-	for range 20{
-		for _, server := range servers{
-			resp := r.queryQ(q, server)
+type NS_RR struct {
+	A   net.IP 
+	dns.NS
+}
 
-			if len(resp.Answer) > 0 {
-				answer = append(answer, resp.Answer...)
-				if q.Qtype == dns.TypeA{
-					var cnameResolved bool
-					for _, rr := range resp.Answer{
-						if rr.Header().Name == q.Name && rr.Header().Rrtype == dns.TypeA{
-							cnameResolved = true
-							break
-						}
-						if rr, ok := rr.(*dns.CNAME); ok{
-							servers = rootServers
-							q.Name = rr.Target
-							r.logger.Debug("Resolving CNAME " + q.Name)
-						}
-					}
-					if !cnameResolved {
-						goto NextRound
-					}
-				}
-				return answer, nil
-			}
+type Cache map[string]NS_RR
 
-			// glue records
-			// following glue records regardless
-			var nextServers []string
-			if len(resp.Extra) > 0{
-				for _, extr := range resp.Extra{
-					if rr, ok := extr.(*dns.A); ok{
-						r.logger.Info("Got additional field " + rr.String())
-						nextServers = append(nextServers, rr.A.String())
-					}
-				}
-			}
+func (c Cache) getClosestZone(name string) []NS_RR{
+	// www.apple.com
+	searchList := make([]NS_RR, 0,0)
 
-			if len(nextServers) > 0{
-				servers = nextServers
-				goto NextRound 
-			}
-
-			if len(resp.Ns) > 0 {
-				r.logger.Info("Got more than zero referals" )
-				for _, ns := range resp.Ns {
-					n, ok := ns.(*dns.NS)
-					r.logger.Debug(fmt.Sprintf("%+v", n))
-					if ok {
-						nsq := dns.Question{Name: n.Ns, Qtype: dns.TypeA, Qclass: dns.ClassINET}
-						// resolve NS; again starting with rootServers
-						r.logger.Debug("RESOLVING NS ")
-						rr, err := r.resolveQ(nsq, depth+1)
-						if err != nil{
-							r.logger.Warn("Err during resolve referals: ", "referal name", n.Hdr.Name, "err", err)
-							continue
-						}
-						for _, r := range rr{
-							if ar, ok := r.(*dns.A); ok{
-								nextServers = append(nextServers, ar.A.String())
-							}
-						}
-					}
-				}
-			}
-
-			if len(nextServers) > 0{
-				servers = nextServers
-				goto NextRound 
-			}
+	for zone, rr := range c{
+		if strings.HasSuffix(name, zone){
+			searchList = append(searchList, rr)
+			break
 		}
-		return nil, notFoundErr 
-
-		NextRound:
 	}
-	return answer, notFoundErr
+
+	if len(searchList) == 0{
+		searchList = append(searchList, safeBelt...) 
+	}
+	return searchList
+}
+
+func (r Resolver) resolveQ(q dns.Question, depth int) ([]dns.RR, error) {
+	// loop
+	// s := get_the_closest_server(q.Name)
+	// s - is_available? -> no -> resolve in gorutine
+	//   |
+	//  ask s about q.Name
+	//        |
+	//      response
+	//        |
+	//    do we have answer?  -> yes, return, if CNAME and qtype A change SNAME -- to CNAME 
+	//     /     \
+	//    /       \
+	//  ns ref     glue
+	//  cache       find cache and add type.A IP
+	//   
+	//  what to use for cache
+	//  map[responsible_zone]dns.A
+				// a structure which describes the name servers and the
+    //             zone which the resolver is currently trying to query.
+    //             This structure keeps track of the resolver's current
+    //             best guess about which name servers hold the desired
+    //             information; it is updated when arriving information
+    //             changes the guess.  This structure includes the
+    //             equivalent of a zone name, the known name servers for
+    //             the zone, the known addresses for the name servers, and
+    //             history information which can be used to suggest which
+    //             server is likely to be the best one to try next.  The
+    //             zone name equivalent is a match count of the number of
+    //             labels from the root down which SNAME has in common with
+    //             the zone being queried; this is used as a measure of how
+    //             "close" the resolver is to SNAME
+
+	for range 20{
+		r.Cache.getClosestZone(q.Name)
+	}
+
+
+	return nil, nil	
 }
 
 func handleAll(w dns.ResponseWriter, m *dns.Msg) {
 	msg := new(dns.Msg)
 	msg.SetReply(m)
+	resolver := Resolver{slog.Default(), make(Cache)}
 
 	for _, q := range m.Question {
-		rr, err  := Resolver{slog.Default()}.resolveQ(q, 0)		
+		rr, err  := resolver.resolveQ(q, 0)		
 		if err != nil{
 			// write err as dns err
 			slog.Error("Got err during resolve: ", "err", err)
