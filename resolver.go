@@ -9,8 +9,8 @@ import (
 	"github.com/miekg/dns"
 )
 
-var safeBelt = []NS_RR{
-	{
+var safeBelt = map[string]NS_RR{
+	"a.root-servers.net.": {
 		ip: net.ParseIP("198.41.0.4"),
 		NS: dns.NS{
 			Hdr: dns.RR_Header{
@@ -21,7 +21,7 @@ var safeBelt = []NS_RR{
 			Ns: "a.root-servers.net.",
 		},
 	},
-	{
+	"b.root-servers.net.": {
 		ip: net.ParseIP("199.9.14.201"),
 		NS: dns.NS{
 			Hdr: dns.RR_Header{
@@ -32,7 +32,7 @@ var safeBelt = []NS_RR{
 			Ns: "b.root-servers.net.",
 		},
 	},
-	{
+	"c.root-servers.net.": {
 		ip: net.ParseIP("192.33.4.12"),
 		NS: dns.NS{
 			Hdr: dns.RR_Header{
@@ -50,7 +50,7 @@ var notFoundErr = fmt.Errorf("Couldn't find any answers for given query")
 type Resolver struct {
 	logger *slog.Logger
 	Cache  Cache
-	mu     sync.Mutex
+	mu     sync.RWMutex
 }
 
 func (r *Resolver) queryQ(q dns.Question, server string) *dns.Msg {
@@ -74,7 +74,8 @@ type NS_RR struct {
 	dns.NS
 }
 
-type Cache map[string][]NS_RR
+type Zone = string
+type Cache map[Zone]map[string]NS_RR
 
 func (c Cache) getClosestZone(name string, match int) string {
 	// www.apple.com
@@ -132,20 +133,23 @@ func (r *Resolver) resolveQ(q dns.Question, depth int) ([]dns.RR, error) {
 	for range 20 {
 		zone := r.Cache.getClosestZone(q.Name, match)
 
+		if zone == "." {
+			r.Cache["."] = safeBelt
+		}
+
 		servers := r.Cache[zone]
+		r.logger.Info("Got closest zone: ", "zone", zone)
 
 		var serverIP net.IP
 		resolving := make(map[string]bool)
-		for len(serverIP.String()) == 0 {
-			for i := range servers {
-				server := servers[i]
-
-				if len(server.ip.String()) == 0 {
-					if resolving[server.Ns] {
+		for serverIP == nil{
+			for domainName, server_RR := range servers {
+				if server_RR.ip == nil {
+					if resolving[server_RR.Ns] {
 						continue
 					}
 					go func() {
-						q := dns.Question{Name: server.Ns, Qtype: dns.TypeA, Qclass: dns.ClassINET}
+						q := dns.Question{Name: server_RR.Ns, Qtype: dns.TypeA, Qclass: dns.ClassINET}
 						resp, err := r.resolveQ(q, depth+1)
 						if err != nil {
 							return
@@ -154,17 +158,79 @@ func (r *Resolver) resolveQ(q dns.Question, depth int) ([]dns.RR, error) {
 						r.mu.Lock()
 						for _, rr := range resp {
 							if rr, ok := rr.(*dns.A); ok {
-								servers[i].ip = rr.A
+								s := servers[domainName]
+								s.ip = rr.A
+								servers[domainName] = s
 							}
 						}
-						delete(resolving, server.Ns)
-						r.mu.Lock()
+						delete(resolving, server_RR.Ns)
+						r.mu.Unlock()
 					}()
 				} else {
-					serverIP = server.ip
+					serverIP = server_RR.ip
 					break
 				}
 			}
+		}
+		r.logger.Info("Resolved ", "server ip", serverIP, "b", len(serverIP.String()) == 0, "b", serverIP == nil)
+
+		resp := r.queryQ(q, serverIP.String())
+		// analyze response
+
+		if len(resp.Answer) > 0 {
+			return resp.Answer, nil
+		}
+
+		gluedRefferences := map[string]NS_RR{}
+		if len(resp.Extra) > 0 {
+			// com.  l.gtld-.com
+			// l.gtld-.com 182.23
+			for _, extr := range resp.Extra {
+				extra_rr, ok := extr.(*dns.A)
+				if !ok {
+					continue
+				}
+
+				for _, rr := range resp.Ns {
+					rr, ok := rr.(*dns.NS)
+					if !ok {
+						continue
+					}
+
+					if rr.Ns == extr.Header().Name {
+						gluedRefferences[rr.Ns] = NS_RR{NS: *rr, ip: extra_rr.A}
+					}
+				}
+			}
+		}
+
+		if len(resp.Ns) > 0 {
+			r.mu.Lock()
+			for _, rr := range resp.Ns {
+				rr, ok := rr.(*dns.NS)
+				if !ok {
+					continue
+				}
+				_, zone_exists := r.Cache[rr.Header().Name]
+				if !zone_exists {
+					r.Cache[rr.Header().Name] = map[string]NS_RR{}
+				}
+
+				_, rr_exists := r.Cache[rr.Header().Name][rr.Ns]
+				if rr_exists {
+					continue
+				}
+
+				var nsRR NS_RR
+				if _, ok := gluedRefferences[rr.Ns]; ok {
+					nsRR = gluedRefferences[rr.Ns]
+				} else {
+					nsRR = NS_RR{NS: *rr}
+				}
+
+				r.Cache[rr.Header().Name][rr.Ns] = nsRR
+			}
+			r.mu.Unlock()
 		}
 	}
 
@@ -174,7 +240,7 @@ func (r *Resolver) resolveQ(q dns.Question, depth int) ([]dns.RR, error) {
 func handleAll(w dns.ResponseWriter, m *dns.Msg) {
 	msg := new(dns.Msg)
 	msg.SetReply(m)
-	resolver := Resolver{slog.Default(), make(Cache), sync.Mutex{}}
+	resolver := Resolver{slog.Default(), make(Cache), sync.RWMutex{}}
 
 	for _, q := range m.Question {
 		rr, err := resolver.resolveQ(q, 0)

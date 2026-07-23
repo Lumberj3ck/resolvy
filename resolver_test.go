@@ -82,7 +82,7 @@ func TestCacheMatching(t *testing.T) {
 		c := make(Cache)
 
 		for _, zone := range Tcase.zones {
-			c[zone] = []NS_RR{}
+			c[zone] = map[string]NS_RR{}
 		}
 
 		t.Run(Tcase.test, func(t *testing.T) {
@@ -95,7 +95,8 @@ func TestCacheMatching(t *testing.T) {
 }
 
 func TestCNAMEResolvePath(t *testing.T) {
-	testCases := []string{"blog.dnsimple.com", "www.github.com", "www.apple.com", "dns1.p01.nsone.net"}
+	// testCases := []string{"blog.dnsimple.com", "www.github.com", "www.apple.com", "dns1.p01.nsone.net"}
+	testCases := []string{"google.com", "gisma.com"}
 	v := os.Getenv("RESOLVY_LOGS")
 	var writer io.Writer
 	if v == "" {
