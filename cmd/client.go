@@ -26,18 +26,18 @@ func main() {
 	m.RecursionDesired = false
 
 	d, _, err := c.Exchange(m, serverAddr)
-	if err != nil{
+	if err != nil {
 		log.Fatalf("err during dns exchange: ", err.Error())
 	}
 
 	log.Println(d)
 	log.Println(d.Answer, len(d.Answer))
 	log.Println("Is Truncated: ", d.Truncated)
-	if d.Truncated{
+	if d.Truncated {
 		c.Net = "tcp"
 		d, _, err := c.Exchange(m, serverAddr)
 
-		if err != nil{
+		if err != nil {
 			log.Fatalf("err during dns exchange: ", err.Error())
 		}
 
